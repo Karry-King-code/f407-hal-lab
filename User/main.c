@@ -1,42 +1,33 @@
 /*
- * 节点 1 · 点亮 LED 灯（HAL 库版 · 练习模板）
+ * 节点 1 · 点亮 LED 灯（HAL 库版 · 练习）
  *
- * practice 分支 = 你手敲的地方；main 分支 = 参考答案（卡壳15分钟以上再看）。
- * 目标现象：LED1（PD10，高电平亮）500ms 亮 / 500ms 灭循环。
- *
- * 脚手架已给（不用动）：HAL_Init、SysTick 心跳（stm32f4xx_it.c）、MX_GPIO_Init 空壳。
- * 你要写的：①MX_GPIO_Init 里的三小步 ②主循环的亮灭交替。
- * 教材：docs/教程-节点1-点亮LED灯.md 第四节。
+ * 硬件事实与寄存器版相同：LED1 = PD10，高电平亮，500ms 节奏，上电先灭。
+ * 时钟：不写 SystemClock_Config，复位默认 HSI 16MHz（HAL_Init 已把 SysTick 配成 1ms 心跳）。
  */
 
 #include "stm32f4xx_hal.h"
 
-static void MX_GPIO_Init(void);
-
 int main(void)
 {
-    HAL_Init();        /* 脚手架：SysTick 1ms 心跳，HAL_Delay 靠它 */
-    MX_GPIO_Init();    /* ← 你来填 */
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-    while (1)
-    {
-        /* ⑤ 亮 500ms → 灭 500ms → 循环
-           提示：置高/置低用哪个函数？延时用哪个函数？（教程 4.1 对照表） */
-    }
-}
+  HAL_Init();                     /* HAL 自我准备：SysTick 1ms 心跳、NVIC 分组 */
 
-static void MX_GPIO_Init(void)
-{
-    /* ① 先声明"参数单"变量：类型叫 GPIO_InitTypeDef（教程 4.2 有完整写法） */
+  __HAL_RCC_GPIOD_CLK_ENABLE();   /* 开 GPIOD 时钟（HAL 替你写 AHB1ENR 的 bit3） */
 
-    /* ② 开 GPIOD 端口时钟（HAL 宏，教程 4.1 对照表第 1 行） */
+  GPIO_InitStruct.Pin   = GPIO_PIN_10;          /* PD10 */
+  GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;  /* 推挽输出（写 MODER=01、OTYPER=0） */
+  GPIO_InitStruct.Pull  = GPIO_NOPULL;          /* 不上下拉（PUPDR=00） */
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;  /* 低速（OSPEEDR=00） */
+  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);       /* 一句替你四连写：MODER/OTYPER/OSPEEDR/PUPDR */
 
-    /* ③ 先给安全初态：配模式前先把 PD10 拉低（灭）——和寄存器版"先给初态"同一个道理 */
+  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_10, GPIO_PIN_RESET);   /* 上电先灭（BSRR 高 16 位清零） */
 
-    /* ④ 填四字段再交给 HAL_GPIO_Init：
-       Pin   = 第 10 脚
-       Mode  = 推挽输出
-       Pull  = 不上拉不下拉
-       Speed = 低速
-       然后：谁替你写 MODER/OTYPER/OSPEEDR/PUPDR？（教程 4.1） */
+  while (1)
+  {
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_10, GPIO_PIN_RESET);  /* 灭：BR10 = 输出低电平 */
+    HAL_Delay(500);                                         /* HAL 毫秒延时（uwTick 差值法） */
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_10, GPIO_PIN_SET);    /* 亮：BS10 = 输出高电平 */
+    HAL_Delay(500);
+  }
 }
