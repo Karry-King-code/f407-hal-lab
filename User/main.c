@@ -1,43 +1,95 @@
 /*
- * 节点 1 · 点亮 LED 灯（HAL 库版 · 参考答案）
+ * 节点 2 · 按键控制 LED（HAL 库版 · 练习模板）
  *
- * 硬件事实与寄存器版完全相同（见 docs/硬件事实表.md）：
- *   LED1 = PD10，高电平点亮，500ms 闪烁
+ * 硬件事实与寄存器版相同：KEY1 = PD13（低有效，板载上拉），LED1 = PD10（高电平亮）。
+ * 目标行为（你寄存器版写的同款）：按一下 K1 → 红灯开始 500ms 闪；再按一下 → 停止灭。
  *
- * 时钟：不调用 SystemClock_Config，保持复位默认 HSI 16MHz
- *（与寄存器版同基准；HAL_Init 已把 SysTick 配成 1ms 中断，HAL_Delay 可直接用）
+ * 脚手架已给：主循环的分片节拍逻辑（你刚在寄存器版吃透的那套，一句没改）。
+ * 你要写的两处：
+ *   A. MX_GPIO_Init：开时钟宏 + PD13 输入四字段 + PD10 输出四字段 + 上电先灭
+ *   B. key_pressed：读按键 = HAL_GPIO_ReadPin（总文档节点二章有提示）
  */
 
 #include "stm32f4xx_hal.h"
 
 static void MX_GPIO_Init(void);
+uint8_t key_pressed(void);
 
 int main(void)
 {
-    HAL_Init();                 /* HAL 自我准备：SysTick 1ms 心跳、NVIC 分组 */
-    MX_GPIO_Init();             /* 我们的活：把 PD10 配成输出 */
+  uint8_t  running = 0;
+  uint16_t slice   = 0;
 
-    while (1)
+  HAL_Init();
+  MX_GPIO_Init();                     /* ← 你来填（A） */
+
+  while (1)
+  {
+    if (key_pressed())                /* ← 你来填（B） */
     {
-        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_10, GPIO_PIN_SET);     /* 亮 */
-        HAL_Delay(500);
-        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_10, GPIO_PIN_RESET);   /* 灭 */
-        HAL_Delay(500);
+      running = !running;             /* 开 <-> 停 */
+      if (running == 0)
+        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_10, GPIO_PIN_RESET);   /* 停止：灯灭 */
     }
+    if (running)
+    {
+      if (++slice >= 50)              /* 50 片 x 10ms = 500ms */
+      {
+        slice = 0;
+        HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_10);   /* HAL 自带翻转（= ODR ^= 那行的代办员） */
+      }
+    }
+    HAL_Delay(10);                    /* 节拍器：每圈 10ms */
+  }
 }
 
 static void MX_GPIO_Init(void)
 {
+  /* ⓪ 先声明"参数单"：GPIO_InitTypeDef GPIO_InitStruct = {0};
+     两颗脚可以共用同一张参数单（填 PD13 交一次，再填 PD10 交一次） */
     GPIO_InitTypeDef GPIO_InitStruct = {0};
+  /* ① 开 GPIOD 时钟（HAL 宏） */
+    __HAL_RCC_GPIOD_CLK_ENABLE();
+  /* ② PD13 输入：
+     Pin=13号脚 / Mode=GPIO_MODE_INPUT / Pull=?（板上已有外部上拉，想想填哪个）/ Speed 低速
+     然后 HAL_GPIO_Init */
+		GPIO_InitStruct.Pin   = GPIO_PIN_13;          
+		GPIO_InitStruct.Mode  = GPIO_MODE_INPUT;  
+		GPIO_InitStruct.Pull  = GPIO_NOPULL;
+		GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+		HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+  /* ③ PD10 推挽输出：四字段 + HAL_GPIO_Init（节点一的代码）
+     上电先灭：HAL_GPIO_WritePin(...RESET) */
+		GPIO_InitStruct.Pin   = GPIO_PIN_10;          /* PD10 */
+		GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;  
+		GPIO_InitStruct.Pull  = GPIO_NOPULL;
+		GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+		HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+		HAL_GPIO_WritePin(GPIOD, GPIO_PIN_10, GPIO_PIN_RESET);   /* 上电先灭 */
+}
 
-    __HAL_RCC_GPIOD_CLK_ENABLE();   /* 开 GPIOD 时钟（HAL 替你写 AHB1ENR.bit3） */
+uint8_t key_pressed(void)
+{
+  /* 思路同寄存器版：边沿检测 + 消抖 + 等松手
+     把寄存器版里的 (GPIOD->IDR & GPIO_IDR_ID13) 换成 HAL 的读引脚函数：
+     HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_13) —— 返回 GPIO_PIN_RESET(=0 按下) / GPIO_PIN_SET(=1 松开)
+     delay 用 HAL_Delay */
+	static uint8_t last = 1;
+  uint8_t now = (HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_13) == GPIO_PIN_RESET) ? 0 : 1;
+  uint8_t evt = 0;
 
-    /* 先给安全初态（灭），再配模式——顺序和寄存器版一致的道理 */
-    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_10, GPIO_PIN_RESET);
-
-    GPIO_InitStruct.Pin   = GPIO_PIN_10;        /* 第 10 脚 */
-    GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP; /* 推挽输出 */
-    GPIO_InitStruct.Pull  = GPIO_NOPULL;         /* 不上不下 */
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW; /* 低速够用 */
-    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);      /* HAL 替你写 MODER/OTYPER/OSPEEDR/PUPDR */
+  if (last == 1 && now == 0)                           /* 1->0 = 按下沿 */
+  {
+    HAL_Delay(10);                                     /* 按下消抖 */
+    if (HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_13) == GPIO_PIN_RESET)
+    {
+      evt = 1;
+      while (HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_13) == GPIO_PIN_RESET)
+      {
+      }                                                /* 等松手 */
+      HAL_Delay(10);                                   /* 释放消抖 */
+    }
+  }
+  last = now;
+  return evt;
 }
