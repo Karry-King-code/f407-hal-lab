@@ -45,7 +45,8 @@ int main(void)
 
 static void MX_GPIO_Init(void)
 {
-  GPIO_InitTypeDef GPIO_InitStruct = {0};   /* 两颗脚可以共用一个"参数单" */
+  /* ⓪ 先声明"参数单"：GPIO_InitTypeDef GPIO_InitStruct = {0};
+     两颗脚可以共用同一张参数单（填 PD13 交一次，再填 PD10 交一次） */
 
   /* ① 开 GPIOD 时钟（HAL 宏） */
 
