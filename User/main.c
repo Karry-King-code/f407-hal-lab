@@ -47,15 +47,25 @@ static void MX_GPIO_Init(void)
 {
   /* ⓪ 先声明"参数单"：GPIO_InitTypeDef GPIO_InitStruct = {0};
      两颗脚可以共用同一张参数单（填 PD13 交一次，再填 PD10 交一次） */
-
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* ① 开 GPIOD 时钟（HAL 宏） */
-
+    __HAL_RCC_GPIOD_CLK_ENABLE();
   /* ② PD13 输入：
      Pin=13号脚 / Mode=GPIO_MODE_INPUT / Pull=?（板上已有外部上拉，想想填哪个）/ Speed 低速
      然后 HAL_GPIO_Init */
-
+		GPIO_InitStruct.Pin   = GPIO_PIN_13;          
+		GPIO_InitStruct.Mode  = GPIO_MODE_INPUT;  
+		GPIO_InitStruct.Pull  = GPIO_NOPULL;
+		GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+		HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
   /* ③ PD10 推挽输出：四字段 + HAL_GPIO_Init（节点一的代码）
      上电先灭：HAL_GPIO_WritePin(...RESET) */
+		GPIO_InitStruct.Pin   = GPIO_PIN_10;          /* PD10 */
+		GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;  
+		GPIO_InitStruct.Pull  = GPIO_NOPULL;
+		GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+		HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+		HAL_GPIO_WritePin(GPIOD, GPIO_PIN_10, GPIO_PIN_RESET);   /* 上电先灭 */
 }
 
 uint8_t key_pressed(void)
@@ -64,5 +74,22 @@ uint8_t key_pressed(void)
      把寄存器版里的 (GPIOD->IDR & GPIO_IDR_ID13) 换成 HAL 的读引脚函数：
      HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_13) —— 返回 GPIO_PIN_RESET(=0 按下) / GPIO_PIN_SET(=1 松开)
      delay 用 HAL_Delay */
-  return 0;   /* ← 写完记得让这函数真的能返回 1 */
+	static uint8_t last = 1;
+  uint8_t now = (HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_13) == GPIO_PIN_RESET) ? 0 : 1;
+  uint8_t evt = 0;
+
+  if (last == 1 && now == 0)                           /* 1->0 = 按下沿 */
+  {
+    HAL_Delay(10);                                     /* 按下消抖 */
+    if (HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_13) == GPIO_PIN_RESET)
+    {
+      evt = 1;
+      while (HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_13) == GPIO_PIN_RESET)
+      {
+      }                                                /* 等松手 */
+      HAL_Delay(10);                                   /* 释放消抖 */
+    }
+  }
+  last = now;
+  return evt;
 }
