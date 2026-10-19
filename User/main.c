@@ -1,95 +1,94 @@
 /*
- * 节点 2 · 按键控制 LED（HAL 库版 · 练习模板）
+ * 节点 3 · 串口收发（HAL 库版 · 练习模板）
  *
- * 硬件事实与寄存器版相同：KEY1 = PD13（低有效，板载上拉），LED1 = PD10（高电平亮）。
- * 目标行为（你寄存器版写的同款）：按一下 K1 → 红灯开始 500ms 闪；再按一下 → 停止灭。
+ * 目标行为与寄存器版相同：中断接收 + 环形缓冲 + 回显，一个字节不丢。
  *
- * 脚手架已给：主循环的分片节拍逻辑（你刚在寄存器版吃透的那套，一句没改）。
- * 你要写的两处：
- *   A. MX_GPIO_Init：开时钟宏 + PD13 输入四字段 + PD10 输出四字段 + 上电先灭
- *   B. key_pressed：读按键 = HAL_GPIO_ReadPin（总文档节点二章有提示）
+ * ┌─────────────────────────────────────────────────────────────────┐
+ * │ 去哪找函数：全部 UART 函数声明在这个文件（Keil 打开后 F12 跳转）：  │
+ * │   Libraries/STM32F4xx_HAL_Driver/Inc/stm32f4xx_hal_uart.h        │
+ * │ 本节点要用的五个（行号实测于 2.17.0 版头文件）：                  │
+ * │   718  HAL_UART_Init(huart)                                      │
+ * │        把波特率/字长/收发使能一次配好（= BRR+CR1 的代办员）        │
+ * │   745  HAL_UART_Transmit(huart, buf, 长度, 超时ms)                │
+ * │        阻塞发送（= "等TXE再写DR"的循环打包）                       │
+ * │   748  HAL_UART_Receive_IT(huart, buf, 长度)                      │
+ * │        挂一个中断接收：字节到了自动存进 buf 并触发回调             │
+ * │   773  HAL_UART_RxCpltCallback(huart)                            │
+ * │        上面收完后 HAL 反过来叫你（弱定义，你覆写它）               │
+ * │   —— 还有 HAL_UART_MspInit(huart)：HAL_UART_Init 会自动调它，      │
+ * │      时钟/GPIO/NVIC 这些"芯片相关"的活全写在这（= 寄存器版①②搬家）│
+ * └─────────────────────────────────────────────────────────────────┘
+ *
+ * 你的任务四处：
+ *   A. MX_UART1_Init：给 huart1 填七个字段 + 调 HAL_UART_Init
+ *   B. 覆写 HAL_UART_MspInit：时钟 + PA9/PA10 复用 AF7 + NVIC（寄存器版①②搬家）
+ *   C. 覆写 HAL_UART_RxCpltCallback：字节进环形缓冲 + 重新挂 Receive_IT
+ *   D. main 开头挂第一个 Receive_IT（已给）
+ * 主循环回显已给。
  */
 
 #include "stm32f4xx_hal.h"
 
-static void MX_GPIO_Init(void);
-uint8_t key_pressed(void);
+#define BUF_LEN 64
+volatile uint8_t  rbuf[BUF_LEN];
+volatile uint16_t rhead = 0, rtail = 0;
+uint8_t rx_byte;                          /* 中断接收的落脚点（Receive_IT 往这存） */
+
+UART_HandleTypeDef huart1;                /* 串口句柄：HAL 靠它认得这颗串口 */
+
+static void MX_UART1_Init(void);
 
 int main(void)
 {
-  uint8_t  running = 0;
-  uint16_t slice   = 0;
-
   HAL_Init();
-  MX_GPIO_Init();                     /* ← 你来填（A） */
+  MX_UART1_Init();                        /* A */
+
+  HAL_UART_Receive_IT(&huart1, &rx_byte, 1);   /* D：挂第一个中断接收 */
 
   while (1)
   {
-    if (key_pressed())                /* ← 你来填（B） */
+    if (rtail != rhead)                   /* 缓冲有货（已给） */
     {
-      running = !running;             /* 开 <-> 停 */
-      if (running == 0)
-        HAL_GPIO_WritePin(GPIOD, GPIO_PIN_10, GPIO_PIN_RESET);   /* 停止：灯灭 */
-    }
-    if (running)
-    {
-      if (++slice >= 50)              /* 50 片 x 10ms = 500ms */
-      {
-        slice = 0;
-        HAL_GPIO_TogglePin(GPIOD, GPIO_PIN_10);   /* HAL 自带翻转（= ODR ^= 那行的代办员） */
-      }
-    }
-    HAL_Delay(10);                    /* 节拍器：每圈 10ms */
-  }
-}
-
-static void MX_GPIO_Init(void)
-{
-  /* ⓪ 先声明"参数单"：GPIO_InitTypeDef GPIO_InitStruct = {0};
-     两颗脚可以共用同一张参数单（填 PD13 交一次，再填 PD10 交一次） */
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
-  /* ① 开 GPIOD 时钟（HAL 宏） */
-    __HAL_RCC_GPIOD_CLK_ENABLE();
-  /* ② PD13 输入：
-     Pin=13号脚 / Mode=GPIO_MODE_INPUT / Pull=?（板上已有外部上拉，想想填哪个）/ Speed 低速
-     然后 HAL_GPIO_Init */
-		GPIO_InitStruct.Pin   = GPIO_PIN_13;          
-		GPIO_InitStruct.Mode  = GPIO_MODE_INPUT;  
-		GPIO_InitStruct.Pull  = GPIO_NOPULL;
-		GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-		HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
-  /* ③ PD10 推挽输出：四字段 + HAL_GPIO_Init（节点一的代码）
-     上电先灭：HAL_GPIO_WritePin(...RESET) */
-		GPIO_InitStruct.Pin   = GPIO_PIN_10;          /* PD10 */
-		GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;  
-		GPIO_InitStruct.Pull  = GPIO_NOPULL;
-		GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-		HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
-		HAL_GPIO_WritePin(GPIOD, GPIO_PIN_10, GPIO_PIN_RESET);   /* 上电先灭 */
-}
-
-uint8_t key_pressed(void)
-{
-  /* 思路同寄存器版：边沿检测 + 消抖 + 等松手
-     把寄存器版里的 (GPIOD->IDR & GPIO_IDR_ID13) 换成 HAL 的读引脚函数：
-     HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_13) —— 返回 GPIO_PIN_RESET(=0 按下) / GPIO_PIN_SET(=1 松开)
-     delay 用 HAL_Delay */
-	static uint8_t last = 1;
-  uint8_t now = (HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_13) == GPIO_PIN_RESET) ? 0 : 1;
-  uint8_t evt = 0;
-
-  if (last == 1 && now == 0)                           /* 1->0 = 按下沿 */
-  {
-    HAL_Delay(10);                                     /* 按下消抖 */
-    if (HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_13) == GPIO_PIN_RESET)
-    {
-      evt = 1;
-      while (HAL_GPIO_ReadPin(GPIOD, GPIO_PIN_13) == GPIO_PIN_RESET)
-      {
-      }                                                /* 等松手 */
-      HAL_Delay(10);                                   /* 释放消抖 */
+      uint8_t c = rbuf[rtail];
+      rtail = (rtail + 1) % BUF_LEN;
+      HAL_UART_Transmit(&huart1, &c, 1, 100);   /* 回显，最多等 100ms */
     }
   }
-  last = now;
-  return evt;
 }
+
+/* A：七个字段全照寄存器版概念填，然后一句 HAL_UART_Init 全部生效 */
+static void MX_UART1_Init(void)
+{
+  /* huart1.Instance          = USART1;                 哪颗串口 */
+  /* huart1.Init.BaudRate     = 115200;                 波特率（HAL 替你算 BRR=0x8B） */
+  /* huart1.Init.WordLength   = UART_WORDLENGTH_8B;     8 数据位 */
+  /* huart1.Init.StopBits     = UART_STOPBITS_1;        1 停止位 */
+  /* huart1.Init.Parity       = UART_PARITY_NONE;       无校验 */
+  /* huart1.Init.Mode         = UART_MODE_TX_RX;        收发都开（= TE|RE） */
+  /* huart1.Init.HwFlowCtl    = UART_HWCONTROL_NONE;    无流控 */
+  /* huart1.Init.OverSampling = UART_OVERSAMPLING_16;   16 倍过采样（BRR 公式里的那个 16） */
+  /* HAL_UART_Init(&huart1); */
+
+  (void)huart1;
+}
+
+/* B：取消注释并补全。HAL_UART_Init 每次都会自动调这个回调——
+      时钟/GPIO/NVIC 这些芯片相关的活全在这（= 寄存器版的①②两步整体搬家）
+void HAL_UART_MspInit(UART_HandleTypeDef *huart)
+{
+  ① __HAL_RCC_GPIOA_CLK_ENABLE();  __HAL_RCC_USART1_CLK_ENABLE();
+  ② GPIO_InitTypeDef：PA9/PA10 用 GPIO_MODE_AF_PP（注意！不是 OUTPUT_PP 了）
+     + GPIO_PULLUP + AF7（GPIO_AF7_USART1）——两颗脚各 Init 一次
+  ③ HAL_NVIC_SetPriority(USART1_IRQn, 5, 0);
+     HAL_NVIC_EnableIRQ(USART1_IRQn);
+}
+*/
+
+/* C：取消注释并补全。每收完指定字节数（这里=1），HAL 自动叫这个
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  rbuf[rhead] = rx_byte;
+  rhead = (rhead + 1) % BUF_LEN;
+  HAL_UART_Receive_IT(&huart1, &rx_byte, 1);   ← 重新挂上，继续收下一个
+}
+*/
