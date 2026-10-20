@@ -1,187 +1,134 @@
 /*
- * 节点 7 · LVGL 移植（HAL 库版）
+ * 节点 8 · ADC（HAL 库版）—— 读芯片内部温度 + 内部基准
  *
- * 硬件：ST7789 240x320（SCK=PB3 MOSI=PB5 DC=PB0 CS=PA15 RST=PC7 LED=PB1）
- * LVGL：v8.3.11 / 16 位色 / 大端（LV_COLOR_16_SWAP=1）
+ * 不用接任何线：
+ *   ADC1_IN16 = 芯片温度传感器，ADC1_IN17 = VREFINT(1.21V)
  *
- * 与寄存器版的三处差别：
- *   ① SPI 用 HAL_SPI_Transmit 批量发（寄存器版逐字节）
- *   ② 延时用 HAL_Delay（HAL_Init 的 SysTick 心跳）
- *   ③ GPIO 用 HAL_GPIO_WritePin
- * 移植三要素完全相同：lv_init → 注册显示(flush_cb) → 循环 tick + timer_handler
+ * ★ TSVREFE（使能温度传感器）在 F4 的 ADC_CCR bit23（F103 在 ADC_CR2！）
+ *   HAL 的 HAL_ADC_Init 不管这一位，必须自己置——这是本节点唯一的"手动活"。
+ *
+ * HAL 代办员：
+ *   HAL_ADC_Init + HAL_ADC_ConfigChannel   ← CR1/CR2/SMPR/SQR 全套
+ *   HAL_ADC_Start / PollForConversion / GetValue / Stop   ← 启动/等/读
  */
 
 #include "stm32f4xx_hal.h"
-#include "lvgl.h"
 
-#define CS_L()   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_RESET)
-#define CS_H()   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_SET)
-#define DC_L()   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_RESET)
-#define DC_H()   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0, GPIO_PIN_SET)
-#define RST_L()  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_7, GPIO_PIN_RESET)
-#define RST_H()  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_7, GPIO_PIN_SET)
-#define LED_ON() HAL_GPIO_WritePin(GPIOB, GPIO_PIN_1, GPIO_PIN_SET)
-
-#define LCD_W 240
-#define LCD_H 320
-
-SPI_HandleTypeDef hspi1;
-
-void HAL_SPI_MspInit(SPI_HandleTypeDef *hspi)
+/* ============ 串口 ============ */
+static void uart1_send(uint8_t b) { while ((USART1->SR & USART_SR_TXE) == 0) { } USART1->DR = b; }
+static void uart1_str(const char *s) { while (*s) uart1_send((uint8_t)*s++); }
+static void uart1_u32(uint32_t v)
 {
-    GPIO_InitTypeDef gpio = {0};
-    __HAL_RCC_GPIOA_CLK_ENABLE();
-    __HAL_RCC_GPIOB_CLK_ENABLE();
-    __HAL_RCC_GPIOC_CLK_ENABLE();
-    __HAL_RCC_SPI1_CLK_ENABLE();
-
-    gpio.Pin       = GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5;
-    gpio.Mode      = GPIO_MODE_AF_PP;
-    gpio.Pull      = GPIO_NOPULL;
-    gpio.Speed     = GPIO_SPEED_FREQ_VERY_HIGH;
-    gpio.Alternate = GPIO_AF5_SPI1;
-    HAL_GPIO_Init(GPIOB, &gpio);
-
-    gpio.Pin   = GPIO_PIN_0 | GPIO_PIN_1;
-    gpio.Mode  = GPIO_MODE_OUTPUT_PP;
-    gpio.Speed = GPIO_SPEED_FREQ_HIGH;
-    HAL_GPIO_Init(GPIOB, &gpio);
-
-    gpio.Pin  = GPIO_PIN_15;
-    gpio.Mode = GPIO_MODE_OUTPUT_PP;
-    HAL_GPIO_Init(GPIOA, &gpio);
-
-    gpio.Pin  = GPIO_PIN_7;
-    gpio.Mode = GPIO_MODE_OUTPUT_PP;
-    HAL_GPIO_Init(GPIOC, &gpio);
-
-    CS_H(); DC_H();
+    char buf[12]; int i = 0;
+    if (v == 0) { uart1_send('0'); return; }
+    while (v) { buf[i++] = (char)('0' + v % 10U); v /= 10U; }
+    while (i) uart1_send((uint8_t)buf[--i]);
 }
 
-static void MX_SPI1_Init(void)
+static void uart_init(void)
 {
-    hspi1.Instance               = SPI1;
-    hspi1.Init.Mode              = SPI_MODE_MASTER;
-    hspi1.Init.Direction         = SPI_DIRECTION_2LINES;
-    hspi1.Init.DataSize          = SPI_DATASIZE_8BIT;
-    hspi1.Init.CLKPolarity       = SPI_POLARITY_LOW;
-    hspi1.Init.CLKPhase          = SPI_PHASE_1EDGE;
-    hspi1.Init.NSS               = SPI_NSS_SOFT;
-    hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
-    hspi1.Init.FirstBit          = SPI_FIRSTBIT_MSB;
-    hspi1.Init.TIMode            = SPI_TIMODE_DISABLE;
-    hspi1.Init.CRCCalculation    = SPI_CRCCALCULATION_DISABLE;
-    hspi1.Init.CRCPolynomial     = 7;
-    if (HAL_SPI_Init(&hspi1) != HAL_OK) { while (1) { } }
+    SystemCoreClockUpdate();
+    RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+    RCC->APB2ENR |= RCC_APB2ENR_USART1EN;
+    GPIOA->MODER &= ~(3UL << 18);  GPIOA->MODER |= (2UL << 18);
+    GPIOA->MODER &= ~(3UL << 20);  GPIOA->MODER |= (2UL << 20);
+    GPIOA->AFR[1] &= ~(0xFUL << 4);  GPIOA->AFR[1] |= (7UL << 4);
+    GPIOA->AFR[1] &= ~(0xFUL << 8);  GPIOA->AFR[1] |= (7UL << 8);
+    USART1->BRR = 0x8B;
+    USART1->CR1 |= USART_CR1_UE;
+    USART1->CR1 |= USART_CR1_TE | USART_CR1_RE;
 }
 
-/* ============ ST7789 ============ */
-static void lcd_cmd(uint8_t c)
+/* ============ ADC1（HAL） ============ */
+ADC_HandleTypeDef hadc1;
+
+void HAL_ADC_MspInit(ADC_HandleTypeDef *hadc)
 {
-    CS_L(); DC_L();
-    HAL_SPI_Transmit(&hspi1, &c, 1, 100);
-    CS_H();
+    __HAL_RCC_ADC1_CLK_ENABLE();
 }
 
-static void lcd_data(uint8_t d)
+static void MX_ADC1_Init(void)
 {
-    CS_L(); DC_H();
-    HAL_SPI_Transmit(&hspi1, &d, 1, 100);
-    CS_H();
+    ADC_ChannelConfTypeDef sConfig = {0};
+
+    hadc1.Instance                   = ADC1;
+    hadc1.Init.ClockPrescaler        = ADC_CLOCK_SYNC_PCLK_DIV2;  /* 16/2 = 8MHz */
+    hadc1.Init.Resolution            = ADC_RESOLUTION_12B;
+    hadc1.Init.ScanConvMode          = DISABLE;
+    hadc1.Init.ContinuousConvMode    = DISABLE;
+    hadc1.Init.DiscontinuousConvMode = DISABLE;
+    hadc1.Init.ExternalTrigConvEdge  = ADC_EXTERNALTRIGCONVEDGE_NONE;   /* 软件触发 */
+    hadc1.Init.ExternalTrigConv      = ADC_SOFTWARE_START;
+    hadc1.Init.DataAlign             = ADC_DATAALIGN_RIGHT;
+    hadc1.Init.NbrOfConversion       = 1;
+    hadc1.Init.DMAContinuousRequests = DISABLE;
+    hadc1.Init.EOCSelection          = ADC_EOC_SINGLE_CONV;
+    if (HAL_ADC_Init(&hadc1) != HAL_OK) { while (1) { } }
+
+    /* ★ 唯一手动活：使能温度传感器/VREFINT（ADC_CCR bit23） */
+    ADC->CCR |= ADC_CCR_TSVREFE;
+    HAL_Delay(10);                        /* 传感器启动时间 */
+
+    sConfig.Channel      = ADC_CHANNEL_16;   /* 温度传感器 */
+    sConfig.Rank         = 1;
+    sConfig.SamplingTime = ADC_SAMPLETIME_480CYCLES;
+    sConfig.Offset       = 0;
+    HAL_ADC_ConfigChannel(&hadc1, &sConfig);
 }
 
-static void lcd_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+static uint16_t adc_read(uint32_t channel)
 {
-    uint8_t b[4];
-    lcd_cmd(0x2A);
-    b[0] = x0 >> 8; b[1] = x0 & 0xFF; b[2] = x1 >> 8; b[3] = x1 & 0xFF;
-    CS_L(); DC_H(); HAL_SPI_Transmit(&hspi1, b, 4, 100); CS_H();
+    ADC_ChannelConfTypeDef cfg = {0};
+    uint16_t v;
 
-    lcd_cmd(0x2B);
-    b[0] = y0 >> 8; b[1] = y0 & 0xFF; b[2] = y1 >> 8; b[3] = y1 & 0xFF;
-    CS_L(); DC_H(); HAL_SPI_Transmit(&hspi1, b, 4, 100); CS_H();
+    cfg.Channel      = channel;
+    cfg.Rank         = 1;
+    cfg.SamplingTime = ADC_SAMPLETIME_480CYCLES;
+    cfg.Offset       = 0;
+    HAL_ADC_ConfigChannel(&hadc1, &cfg);
 
-    lcd_cmd(0x2C);
-}
-
-static void lcd_init(void)
-{
-    RST_H(); HAL_Delay(10);
-    RST_L(); HAL_Delay(20);
-    RST_H(); HAL_Delay(120);
-
-    lcd_cmd(0x01); HAL_Delay(150);
-    lcd_cmd(0x11); HAL_Delay(120);
-    lcd_cmd(0x3A); lcd_data(0x55);
-    lcd_cmd(0x36); lcd_data(0x00);      /* 竖屏；想横屏改 0x60 并对调宽高 */
-    lcd_cmd(0x20);                      /* 反色关（节点六实测） */
-    lcd_cmd(0x13);
-    lcd_cmd(0x29); HAL_Delay(20);
-}
-
-/* ============ LVGL 移植 ============ */
-static lv_disp_draw_buf_t draw_buf;
-static lv_color_t buf1[LCD_W * 20];
-static lv_disp_drv_t disp_drv;
-
-static void disp_flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_p)
-{
-    uint32_t n = (uint32_t)(area->x2 - area->x1 + 1) * (uint32_t)(area->y2 - area->y1 + 1);
-
-    lcd_set_window((uint16_t)area->x1, (uint16_t)area->y1,
-                   (uint16_t)area->x2, (uint16_t)area->y2);
-    CS_L(); DC_H();
-    HAL_SPI_Transmit(&hspi1, (uint8_t *)color_p, (uint16_t)(n * 2), 500);  /* 整块一次发完 */
-    CS_H();
-
-    lv_disp_flush_ready(drv);
-}
-
-static void ui_create(void)
-{
-    lv_obj_t *scr = lv_scr_act();
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x102040), 0);
-
-    lv_obj_t *title = lv_label_create(scr);
-    lv_label_set_text(title, "F407 + LVGL 8.3");
-    lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
-
-    lv_obj_t *sub = lv_label_create(scr);
-    lv_label_set_text(sub, "ST7789 240x320");
-    lv_obj_set_style_text_color(sub, lv_color_hex(0x80C0FF), 0);
-    lv_obj_align(sub, LV_ALIGN_TOP_MID, 0, 55);
-
-    lv_obj_t *bar = lv_bar_create(scr);
-    lv_obj_set_size(bar, 180, 18);
-    lv_obj_align(bar, LV_ALIGN_CENTER, 0, 40);
-    lv_bar_set_value(bar, 65, LV_ANIM_OFF);
+    HAL_ADC_Start(&hadc1);                          /* 启动转换 */
+    HAL_ADC_PollForConversion(&hadc1, 100);         /* 等转换完成（带超时） */
+    v = (uint16_t)HAL_ADC_GetValue(&hadc1);         /* 取结果 */
+    HAL_ADC_Stop(&hadc1);
+    return v;
 }
 
 int main(void)
 {
+    uint16_t raw_t, raw_vref;
+    uint32_t mv_t, mv_vref, temp_x10;
+
     HAL_Init();
-    MX_SPI1_Init();
-    LED_ON();
-    lcd_init();
+    uart_init();
+    MX_ADC1_Init();
 
-    lv_init();
-    lv_disp_draw_buf_init(&draw_buf, buf1, NULL, LCD_W * 20);
-
-    lv_disp_drv_init(&disp_drv);
-    disp_drv.hor_res  = LCD_W;
-    disp_drv.ver_res  = LCD_H;
-    disp_drv.flush_cb = disp_flush;
-    disp_drv.draw_buf = &draw_buf;
-    lv_disp_drv_register(&disp_drv);
-
-    ui_create();
+    uart1_str("\r\n=== ADC INTERNAL TEST (HAL) ===\r\n");
+    uart1_str("(touch the chip, temperature rises)\r\n");
 
     while (1)
     {
-        lv_tick_inc(5);
-        lv_timer_handler();
-        HAL_Delay(5);
+        raw_t    = adc_read(ADC_CHANNEL_16);        /* 温度传感器 */
+        raw_vref = adc_read(ADC_CHANNEL_VREFINT);   /* 内部基准 */
+
+        mv_t    = (uint32_t)raw_t    * 3300UL / 4095UL;
+        mv_vref = (uint32_t)raw_vref * 3300UL / 4095UL;
+        temp_x10 = (uint32_t)((760 - (int32_t)mv_t) * 4 + 250);
+
+        uart1_str("TEMP_RAW=");
+        uart1_u32(raw_t);
+        uart1_str("  mV=");
+        uart1_u32(mv_t);
+        uart1_str("  T=");
+        uart1_u32(temp_x10 / 10);
+        uart1_send('.');
+        uart1_u32(temp_x10 % 10);
+        uart1_str("C   VREF_RAW=");
+        uart1_u32(raw_vref);
+        uart1_str("  mV=");
+        uart1_u32(mv_vref);
+        uart1_str("\r\n");
+
+        HAL_Delay(500);
     }
 }
