@@ -96,12 +96,9 @@ void HAL_UART_MspInit(UART_HandleTypeDef *huart)
 /* C：取消注释并补全。每收完指定字节数（这里=1），HAL 自动叫这个*/
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
-uint16_t next = (rhead + 1) % BUF_LEN;
-if (next != rtail) {
-    rbuf[rhead] = rx_byte;
-    rhead = next;
-}
-HAL_UART_Receive_IT(huart, &rx_byte, 1);
+  rbuf[rhead] = rx_byte;
+  rhead = (rhead + 1) % BUF_LEN;
+  HAL_UART_Receive_IT(&huart, &rx_byte, 1);   //← 重新挂上，继续收下一个
 }
 
 void USART1_IRQHandler(void)
