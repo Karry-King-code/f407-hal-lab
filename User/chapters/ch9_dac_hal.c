@@ -113,6 +113,8 @@ static uint16_t adc_read_ch4(void)
 
 int main(void)
 {
+    static const uint16_t steps[3] = {0, 2048, 4095};
+    uint8_t i;
     uint16_t set, got;
     uint32_t mv_set, mv_got;
 
@@ -126,8 +128,9 @@ int main(void)
 
     while (1)
     {
-        for (set = 0; set < 4096; set = (uint16_t)(set + 2048))
+        for (i = 0; i < 3; i++)
         {
+            set = steps[i];
             HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, set);
             HAL_Delay(20);
             got = adc_read_ch4();
