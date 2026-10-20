@@ -55,8 +55,8 @@ void uart_init(void)
 
 SPI_HandleTypeDef hspi1;
 
-#define CS_L()   (GPIOA->BSRR = (1UL << 4))
-#define CS_H()   (GPIOA->BSRR = (1UL << 4) << 16)
+#define CS_L()   (GPIOA->BSRR = (1UL << 4) << 16)   /* BSRR 高16位=复位=输出低=选中 */
+#define CS_H()   (GPIOA->BSRR = (1UL << 4))         /* BSRR 低16位=置位=输出高=释放 */
 
 void HAL_SPI_MspInit(SPI_HandleTypeDef *hspi)
 {
