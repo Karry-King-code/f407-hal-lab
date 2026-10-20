@@ -1,15 +1,14 @@
 /*
- * 节点 8 · ADC（HAL 库版）—— 读芯片内部温度 + 内部基准
+ * 节点 9 · DAC（HAL 库版）—— 输出 + ADC 内部回读自测
  *
- * 不用接任何线：
- *   ADC1_IN16 = 芯片温度传感器，ADC1_IN17 = VREFINT(1.21V)
- *
- * ★ TSVREFE（使能温度传感器）在 F4 的 ADC_CCR bit23（F103 在 ADC_CR2！）
- *   HAL 的 HAL_ADC_Init 不管这一位，必须自己置——这是本节点唯一的"手动活"。
+ * 硬件：DAC_OUT1 = PA4（同时是 ADC1_IN4，也是 Flash 的 CS）
+ * 自测：写 DAC，立刻用 ADC 读回同一根脚，两个值应接近
  *
  * HAL 代办员：
- *   HAL_ADC_Init + HAL_ADC_ConfigChannel   ← CR1/CR2/SMPR/SQR 全套
- *   HAL_ADC_Start / PollForConversion / GetValue / Stop   ← 启动/等/读
+ *   HAL_DAC_Init + HAL_DAC_ConfigChannel     ← DAC_CR / 触发源 / 输出缓冲
+ *   HAL_DAC_SetValue(&hdac, CH1, ALIGN_12B_R, v)   ← 写 DHR12R1
+ *   HAL_DAC_Start(&hdac, CH1)                ← 使能通道
+ * ADC 回读仍走节点八的 HAL ADC
  */
 
 #include "stm32f4xx_hal.h"
@@ -39,7 +38,37 @@ static void uart_init(void)
     USART1->CR1 |= USART_CR1_TE | USART_CR1_RE;
 }
 
-/* ============ ADC1（HAL） ============ */
+/* ============ DAC（HAL） ============ */
+DAC_HandleTypeDef hdac;
+
+void HAL_DAC_MspInit(DAC_HandleTypeDef *hdac)
+{
+    GPIO_InitTypeDef gpio = {0};
+
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    __HAL_RCC_DAC_CLK_ENABLE();
+
+    gpio.Pin  = GPIO_PIN_4;
+    gpio.Mode = GPIO_MODE_ANALOG;      /* PA4 模拟模式（DAC/ADC 共用） */
+    gpio.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOA, &gpio);
+}
+
+static void MX_DAC_Init(void)
+{
+    DAC_ChannelConfTypeDef sConfig = {0};
+
+    hdac.Instance = DAC;
+    if (HAL_DAC_Init(&hdac) != HAL_OK) { while (1) { } }
+
+    sConfig.DAC_Trigger      = DAC_TRIGGER_NONE;            /* 软件写值立即输出 */
+    sConfig.DAC_OutputBuffer = DAC_OUTPUTBUFFER_ENABLE;
+    if (HAL_DAC_ConfigChannel(&hdac, &sConfig, DAC_CHANNEL_1) != HAL_OK) { while (1) { } }
+
+    HAL_DAC_Start(&hdac, DAC_CHANNEL_1);
+}
+
+/* ============ ADC（HAL，回读 PA4） ============ */
 ADC_HandleTypeDef hadc1;
 
 void HAL_ADC_MspInit(ADC_HandleTypeDef *hadc)
@@ -52,12 +81,12 @@ static void MX_ADC1_Init(void)
     ADC_ChannelConfTypeDef sConfig = {0};
 
     hadc1.Instance                   = ADC1;
-    hadc1.Init.ClockPrescaler        = ADC_CLOCK_SYNC_PCLK_DIV2;  /* 16/2 = 8MHz */
+    hadc1.Init.ClockPrescaler        = ADC_CLOCK_SYNC_PCLK_DIV2;
     hadc1.Init.Resolution            = ADC_RESOLUTION_12B;
     hadc1.Init.ScanConvMode          = DISABLE;
     hadc1.Init.ContinuousConvMode    = DISABLE;
     hadc1.Init.DiscontinuousConvMode = DISABLE;
-    hadc1.Init.ExternalTrigConvEdge  = ADC_EXTERNALTRIGCONVEDGE_NONE;   /* 软件触发 */
+    hadc1.Init.ExternalTrigConvEdge  = ADC_EXTERNALTRIGCONVEDGE_NONE;
     hadc1.Init.ExternalTrigConv      = ADC_SOFTWARE_START;
     hadc1.Init.DataAlign             = ADC_DATAALIGN_RIGHT;
     hadc1.Init.NbrOfConversion       = 1;
@@ -65,70 +94,58 @@ static void MX_ADC1_Init(void)
     hadc1.Init.EOCSelection          = ADC_EOC_SINGLE_CONV;
     if (HAL_ADC_Init(&hadc1) != HAL_OK) { while (1) { } }
 
-    /* ★ 唯一手动活：使能温度传感器/VREFINT（ADC_CCR bit23） */
-    ADC->CCR |= ADC_CCR_TSVREFE;
-    HAL_Delay(10);                        /* 传感器启动时间 */
-
-    sConfig.Channel      = ADC_CHANNEL_16;   /* 温度传感器 */
+    sConfig.Channel      = ADC_CHANNEL_4;          /* PA4 */
     sConfig.Rank         = 1;
     sConfig.SamplingTime = ADC_SAMPLETIME_480CYCLES;
     sConfig.Offset       = 0;
     HAL_ADC_ConfigChannel(&hadc1, &sConfig);
 }
 
-static uint16_t adc_read(uint32_t channel)
+static uint16_t adc_read_ch4(void)
 {
-    ADC_ChannelConfTypeDef cfg = {0};
     uint16_t v;
-
-    cfg.Channel      = channel;
-    cfg.Rank         = 1;
-    cfg.SamplingTime = ADC_SAMPLETIME_480CYCLES;
-    cfg.Offset       = 0;
-    HAL_ADC_ConfigChannel(&hadc1, &cfg);
-
-    HAL_ADC_Start(&hadc1);                          /* 启动转换 */
-    HAL_ADC_PollForConversion(&hadc1, 100);         /* 等转换完成（带超时） */
-    v = (uint16_t)HAL_ADC_GetValue(&hadc1);         /* 取结果 */
+    HAL_ADC_Start(&hadc1);
+    HAL_ADC_PollForConversion(&hadc1, 100);
+    v = (uint16_t)HAL_ADC_GetValue(&hadc1);
     HAL_ADC_Stop(&hadc1);
     return v;
 }
 
 int main(void)
 {
-    uint16_t raw_t, raw_vref;
-    uint32_t mv_t, mv_vref, temp_x10;
+    uint16_t set, got;
+    uint32_t mv_set, mv_got;
 
     HAL_Init();
     uart_init();
+    MX_DAC_Init();
     MX_ADC1_Init();
 
-    uart1_str("\r\n=== ADC INTERNAL TEST (HAL) ===\r\n");
-    uart1_str("(touch the chip, temperature rises)\r\n");
+    uart1_str("\r\n=== DAC LOOPBACK TEST (HAL) ===\r\n");
+    uart1_str("DAC_OUT1=PA4 (also ADC1_IN4)\r\n");
 
     while (1)
     {
-        raw_t    = adc_read(ADC_CHANNEL_16);        /* 温度传感器 */
-        raw_vref = adc_read(ADC_CHANNEL_VREFINT);   /* 内部基准 */
+        for (set = 0; set < 4096; set = (uint16_t)(set + 2048))
+        {
+            HAL_DAC_SetValue(&hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, set);
+            HAL_Delay(20);
+            got = adc_read_ch4();
 
-        mv_t    = (uint32_t)raw_t    * 3300UL / 4095UL;
-        mv_vref = (uint32_t)raw_vref * 3300UL / 4095UL;
-        temp_x10 = (uint32_t)((760 - (int32_t)mv_t) * 4 + 250);
+            mv_set = (uint32_t)set * 3300UL / 4095UL;
+            mv_got = (uint32_t)got * 3300UL / 4095UL;
 
-        uart1_str("TEMP_RAW=");
-        uart1_u32(raw_t);
-        uart1_str("  mV=");
-        uart1_u32(mv_t);
-        uart1_str("  T=");
-        uart1_u32(temp_x10 / 10);
-        uart1_send('.');
-        uart1_u32(temp_x10 % 10);
-        uart1_str("C   VREF_RAW=");
-        uart1_u32(raw_vref);
-        uart1_str("  mV=");
-        uart1_u32(mv_vref);
-        uart1_str("\r\n");
-
+            uart1_str("DAC_SET=");
+            uart1_u32(set);
+            uart1_str(" (");
+            uart1_u32(mv_set);
+            uart1_str("mV)   ADC_READ=");
+            uart1_u32(got);
+            uart1_str(" (");
+            uart1_u32(mv_got);
+            uart1_str("mV)\r\n");
+        }
+        uart1_str("---\r\n");
         HAL_Delay(500);
     }
 }
